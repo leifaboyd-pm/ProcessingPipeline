@@ -1209,6 +1209,21 @@ const SEED_OPTIONS = {
   processor: ['Matt Miles']
 };
 
+// Boyd Division exclusion. This report is Partners Mortgage only. New uploads
+// carry a Dimension field we filter on, but loans stored before that field was
+// captured have no dimension, so we also match on the known Boyd-only LOs (no
+// LO appears in both dimensions, so this is safe). Either signal marks a loan
+// as Boyd and excludes it everywhere.
+const BOYD_LO_NAMES = new Set([
+  'Kim Fleischmann', 'Laura Ford', 'Matthew Lewis', 'Michael Bjork', 'Vanessa Jezin'
+]);
+function isBoydLoan(l) {
+  if (!l) return false;
+  if (l.dimension && /boyd/i.test(l.dimension)) return true;
+  if (l.owner && BOYD_LO_NAMES.has(String(l.owner).trim())) return true;
+  return false;
+}
+
 // Build the field updates to apply to an existing loan from an incoming row.
 // Non-sticky fields always take the incoming value (so stage, processor,
 // lender, lock expiration, etc. stay current). Sticky date fields only update
@@ -1351,7 +1366,7 @@ async function loadAllData() {
 // uploads. Runs once on load; a no-op once the data is clean. Batched in
 // chunks of 400 to stay within Firestore's write limits.
 async function purgeBoydLoans() {
-  const boyd = loans.filter(l => l.dimension && /boyd/i.test(l.dimension));
+  const boyd = loans.filter(isBoydLoan);
   if (boyd.length === 0) return;
   console.log(`Purging ${boyd.length} Boyd Division loan(s) from the store.`);
   const CHUNK = 400;
@@ -1361,7 +1376,7 @@ async function purgeBoydLoans() {
     await batch.commit();
   }
   // Drop them from the in-memory set too so this render is already clean.
-  loans = loans.filter(l => !(l.dimension && /boyd/i.test(l.dimension)));
+  loans = loans.filter(l => !isBoydLoan(l));
 }
 
 function subscribeRealtime() {
@@ -1369,7 +1384,7 @@ function subscribeRealtime() {
   // case any slip in; the report is Partners Mortgage only.
   onSnapshot(collection(db, 'loans'), (snap) => {
     loans = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-                     .filter(l => !(l.dimension && /boyd/i.test(l.dimension)));
+                     .filter(l => !isBoydLoan(l));
     renderAll();
   });
   onSnapshot(query(collection(db, 'snapshots'), orderBy('uploadedAt', 'desc'), limit(50)), (snap) => {
@@ -2745,7 +2760,11 @@ function rowToLoan(row) {
   // and dollar volume. We drop them at ingestion so every downstream metric,
   // pivot, and report is Partners Mortgage only by construction.
   const dimension = row['Dimension'] || null;
-  if (dimension && /boyd/i.test(dimension)) return null;
+  const ownerName = row['Owner'] || null;
+  if ((dimension && /boyd/i.test(dimension)) ||
+      (ownerName && BOYD_LO_NAMES.has(String(ownerName).trim()))) {
+    return null;
+  }
   return {
     id: guid,
     fileNum, borrower,
